@@ -1,18 +1,31 @@
 'use client';
 
 import { useEffect, useState, useRef } from 'react';
-import { getCurrentUser, type UserResponse } from '@/lib/api';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { getCurrentUser, joinBeta, type UserResponse } from '@/lib/api';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
-import { Skeleton } from '@/components/ui/skeleton';
-import { IconUser, IconMail, IconCalendar, IconShield, IconClock } from '@tabler/icons-react';
+import { Badge as Badge1 } from '@/components/ui/badge-1';
+import { Button as StatefulButton } from '@/components/ui/stateful-button';
+import { MorphingSquare } from '@/components/ui/morphing-square';
+import { IconUser, IconCalendar, IconShield, IconClock } from '@tabler/icons-react';
 import Toaster, { ToasterRef } from '@/components/ui/toast';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Button } from '@/components/ui/button';
 
 export default function ProfilePage() {
   const toasterRef = useRef<ToasterRef>(null);
   const [user, setUser] = useState<UserResponse | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [isJoiningBeta, setIsJoiningBeta] = useState(false);
+  const [showConfirmDialog, setShowConfirmDialog] = useState(false);
 
   useEffect(() => {
     loadUserInfo();
@@ -31,6 +44,35 @@ export default function ProfilePage() {
       });
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleJoinBetaClick = () => {
+    setShowConfirmDialog(true);
+  };
+
+  const handleConfirmJoinBeta = async () => {
+    setShowConfirmDialog(false);
+    setIsJoiningBeta(true);
+    try {
+      const result = await joinBeta();
+      toasterRef.current?.show({
+        title: '加入成功',
+        message: result.message,
+        variant: 'success',
+        position: 'top-right',
+      });
+      // 刷新用户信息
+      await loadUserInfo();
+    } catch (err) {
+      toasterRef.current?.show({
+        title: '加入失败',
+        message: err instanceof Error ? err.message : '加入Beta计划失败',
+        variant: 'error',
+        position: 'top-right',
+      });
+    } finally {
+      setIsJoiningBeta(false);
     }
   };
 
@@ -65,33 +107,8 @@ export default function ProfilePage() {
 
   if (isLoading) {
     return (
-      <div className="flex flex-col gap-4 py-4 md:gap-6 md:py-6">
-        <div className="px-4 lg:px-6">
-          <Skeleton className="h-8 w-32 mb-6" />
-          <Card>
-            <CardHeader>
-              <Skeleton className="h-6 w-24 mb-2" />
-              <Skeleton className="h-4 w-48" />
-            </CardHeader>
-            <CardContent className="space-y-6">
-              <div className="flex items-center gap-4">
-                <Skeleton className="h-20 w-20 rounded-full" />
-                <div className="space-y-2 flex-1">
-                  <Skeleton className="h-6 w-32" />
-                  <Skeleton className="h-4 w-48" />
-                </div>
-              </div>
-              <div className="space-y-4">
-                {[1, 2, 3, 4].map(i => (
-                  <div key={i} className="flex items-center gap-3">
-                    <Skeleton className="h-5 w-5" />
-                    <Skeleton className="h-4 w-full max-w-xs" />
-                  </div>
-                ))}
-              </div>
-            </CardContent>
-          </Card>
-        </div>
+      <div className="flex items-center justify-center min-h-screen">
+        <MorphingSquare message="加载中..." />
       </div>
     );
   }
@@ -116,7 +133,7 @@ export default function ProfilePage() {
               </Avatar>
               <div className="space-y-1">
                 <h2 className="text-2xl font-semibold">{user.username}</h2>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <Badge variant={getTrustLevelColor(user.trust_level)}>
                     {getTrustLevelText(user.trust_level)}
                   </Badge>
@@ -127,6 +144,11 @@ export default function ProfilePage() {
                   )}
                   {user.is_silenced && (
                     <Badge variant="destructive">禁言中</Badge>
+                  )}
+                  {user.beta === 1 && (
+                    <Badge1 variant="turbo">
+                      Beta
+                    </Badge1>
                   )}
                 </div>
               </div>
@@ -176,6 +198,55 @@ export default function ProfilePage() {
             </div>
           </CardContent>
         </Card>
+
+        {user?.beta !== 1 && (
+          <Card className="mt-6 border-dashed">
+            <CardHeader>
+              <CardTitle>Beta</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <p className="text-sm text-muted-foreground mb-3">
+                我们推出了 Beta 计划，加入此计划后，您将获得部分预览功能的访问权限，这些功能可能尚不稳定，我们亦不会对因此产生的问题负责。
+              </p>
+              <Button
+                onClick={handleJoinBetaClick}
+                className="cursor-pointer"
+              >
+                加入 Beta 计划
+              </Button>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* 确认对话框 */}
+        <Dialog open={showConfirmDialog} onOpenChange={setShowConfirmDialog}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>确认加入 Beta 计划</DialogTitle>
+              <DialogDescription>
+                一旦加入 Beta 计划，在新功能完全推出之前将无法退出。Beta 功能可能不稳定，确认继续吗？
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                onClick={() => setShowConfirmDialog(false)}
+                disabled={isJoiningBeta}
+                size="lg"
+                className='cursor-pointer'
+              >
+                取消
+              </Button>
+              <StatefulButton
+                onClick={handleConfirmJoinBeta}
+                disabled={isJoiningBeta}
+                className='cursor-pointer'
+              >
+                确认加入
+              </StatefulButton>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </div>
     </div>
   );
