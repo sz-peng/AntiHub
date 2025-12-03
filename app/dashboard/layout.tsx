@@ -9,6 +9,7 @@ import {
   SidebarProvider,
 } from "@/components/ui/sidebar"
 import { MorphingSquare } from '@/components/ui/morphing-square';
+import { setupTokenRefresh } from '@/lib/api';
 
 export default function DashboardLayout({
   children,
@@ -31,11 +32,14 @@ export default function DashboardLayout({
         // 立即同步存储到 localStorage
         localStorage.setItem('access_token', token);
         localStorage.setItem('user', decodeURIComponent(userParam));
+        console.log('Access token synced to localStorage');
         
-        // 保存 refresh_token
+        // 保存 refresh_token（关键：必须保存，否则无法刷新）
         if (refreshToken) {
           localStorage.setItem('refresh_token', refreshToken);
-          console.log('Refresh token synced to localStorage');
+          console.log('Refresh token synced to localStorage:', refreshToken.substring(0, 20) + '...');
+        } else {
+          console.warn('警告：登录成功但没有收到 refresh_token');
         }
         
         // 保存 token 过期时间
@@ -44,15 +48,23 @@ export default function DashboardLayout({
           localStorage.setItem('token_expires_at', String(expiresAt));
           console.log('Token expires at:', new Date(expiresAt).toISOString());
         }
-        
-        console.log('Token synced to localStorage');
       } catch (error) {
         console.error('Failed to sync login data:', error);
       }
     }
 
+    // 设置主动令牌刷新
+    const cleanup = setupTokenRefresh(() => {
+      // 刷新失败时，重定向到登录页
+      console.error('Token refresh failed, redirecting to login');
+      window.location.href = '/auth?error=session_expired';
+    });
+
     // 标记认证已就绪
     setIsAuthReady(true);
+
+    // 清理函数
+    return cleanup;
   }, [searchParams]);
 
   // 等待认证状态就绪后再渲染子组件

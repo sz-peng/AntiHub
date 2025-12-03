@@ -20,6 +20,7 @@ export interface UserResponse {
   trust_level: number;
   is_active: boolean;
   is_silenced: boolean;
+  beta: number; // 0=未加入beta，1=已加入beta
   created_at: string;
   last_login_at?: string | null;
 }
@@ -133,19 +134,54 @@ function saveAuthCredentials(data: LoginResponse | RefreshTokenResponse, user?: 
 function clearAuthCredentials() {
   if (typeof window === 'undefined') return;
   
+  // 清除 localStorage
   localStorage.removeItem('access_token');
   localStorage.removeItem('refresh_token');
   localStorage.removeItem('token_expires_at');
   localStorage.removeItem('user');
+  
+  // 清除 cookies（设置过期时间为过去）
+  if (typeof document !== 'undefined') {
+    document.cookie = 'access_token=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;';
+    document.cookie = 'refresh_token=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;';
+    document.cookie = 'user=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;';
+    console.log('[clearAuthCredentials] 已清除所有认证凭证（localStorage + cookies）');
+  }
 }
 
 /**
  * 刷新 Token
+ * 尝试从多个来源获取 refresh_token
  */
 async function refreshToken(): Promise<RefreshTokenResponse> {
-  const refreshTokenValue = typeof window !== 'undefined' ? localStorage.getItem('refresh_token') : null;
+  console.log('[refreshToken] 调用刷新接口');
+  
+  // 尝试从多个来源获取 refresh_token
+  let refreshTokenValue = null;
+  
+  // 1. 尝试从 localStorage 读取
+  if (typeof window !== 'undefined') {
+    refreshTokenValue = localStorage.getItem('refresh_token');
+    if (refreshTokenValue) {
+      console.log('[refreshToken] 从 localStorage 获取到 refresh_token');
+    }
+  }
+  
+  // 2. 如果 localStorage 没有，尝试从非 httpOnly cookie 读取
+  if (!refreshTokenValue && typeof document !== 'undefined') {
+    const cookies = document.cookie.split(';');
+    for (const cookie of cookies) {
+      const [name, value] = cookie.trim().split('=');
+      if (name === 'refresh_token') {
+        refreshTokenValue = value;
+        console.log('[refreshToken] 从 cookie 获取到 refresh_token');
+        break;
+      }
+    }
+  }
   
   if (!refreshTokenValue) {
+    console.error('[refreshToken] 无法获取 refresh_token');
     throw new Error('No refresh token available');
   }
   
@@ -154,14 +190,19 @@ async function refreshToken(): Promise<RefreshTokenResponse> {
     headers: {
       'Content-Type': 'application/json',
     },
+    credentials: 'include', // 发送 cookies（以防后端也支持从 cookie 读取）
     body: JSON.stringify({ refresh_token: refreshTokenValue }),
   });
   
   if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Token refresh failed' }));
+    console.error('[refreshToken] 刷新失败:', error);
     throw new Error('Token refresh failed');
   }
   
-  return response.json();
+  const data = await response.json();
+  console.log('[refreshToken] 刷新成功');
+  return data;
 }
 
 /**
@@ -182,22 +223,20 @@ export async function fetchWithAuth<T>(
   
   const response = await fetch(url, { ...options, headers });
   
-  // 如果不是 401 错误，直接处理响应
-  if (response.status !== 401) {
+  // 如果不是 401 或 403 错误，直接处理响应
+  if (response.status !== 401 && response.status !== 403) {
     return handleResponse<T>(response);
   }
   
-  // 处理 401 错误 - 尝试刷新 token
-  const refreshTokenValue = typeof window !== 'undefined' ? localStorage.getItem('refresh_token') : null;
-  
-  if (!refreshTokenValue) {
-    // 没有 refresh token，清除凭证并抛出错误
-    clearAuthCredentials();
-    throw new Error('Authentication required');
-  }
+  // 处理 401/403 错误 - 尝试刷新 token
+  console.log(`[fetchWithAuth] 检测到 ${response.status} 错误，准备刷新 token...`);
+  // 注意：不需要检查 refresh_token 是否存在，因为它在 httpOnly cookie 中
+  // 后端会自动从 cookie 读取
   
   // 如果正在刷新，将请求加入队列
+  console.log('[fetchWithAuth] 检查是否正在刷新:', isRefreshing);
   if (isRefreshing) {
+    console.log('[fetchWithAuth] 正在刷新中，将请求加入队列');
     return new Promise<T>((resolve, reject) => {
       failedQueue.push({
         resolve: async (newToken) => {
@@ -224,7 +263,9 @@ export async function fetchWithAuth<T>(
   isRefreshing = true;
   
   try {
+    console.log('[fetchWithAuth] 正在调用刷新接口...');
     const refreshData = await refreshToken();
+    console.log('[fetchWithAuth] Token 刷新成功');
     
     // 保存新的 token
     saveAuthCredentials(refreshData);
@@ -241,6 +282,7 @@ export async function fetchWithAuth<T>(
     return handleResponse<T>(retryResponse);
     
   } catch (refreshError) {
+    console.error('[fetchWithAuth] Token 刷新失败:', refreshError);
     processQueue(refreshError as Error, null);
     // 刷新失败，清除 token
     clearAuthCredentials();
@@ -405,6 +447,26 @@ export async function getCurrentUser(): Promise<UserResponse> {
   });
 }
 
+/**
+ * 加入Beta计划
+ */
+export async function joinBeta(): Promise<{ success: boolean; message: string; beta: number }> {
+  return fetchWithAuth<{ success: boolean; message: string; beta: number }>(
+    `${API_BASE_URL}/api/auth/join-beta`,
+    { method: 'POST' }
+  );
+}
+
+/**
+ * 获取Beta计划状态
+ */
+export async function getBetaStatus(): Promise<{ success: boolean; message: string; beta: number }> {
+  return fetchWithAuth<{ success: boolean; message: string; beta: number }>(
+    `${API_BASE_URL}/api/auth/beta-status`,
+    { method: 'GET' }
+  );
+}
+
 // ==================== 本地存储工具 ====================
 
 /**
@@ -433,11 +495,51 @@ export function getStoredToken(): string | null {
 }
 
 /**
+ * 从 cookie 中获取值
+ */
+function getCookie(name: string): string | null {
+  if (typeof document === 'undefined') return null;
+  
+  console.log('[getCookie] 查找 cookie:', name);
+  console.log('[getCookie] 所有 cookies:', document.cookie);
+  
+  const value = `; ${document.cookie}`;
+  const parts = value.split(`; ${name}=`);
+  
+  console.log('[getCookie] 分割后的 parts 长度:', parts.length);
+  
+  if (parts.length === 2) {
+    const result = parts.pop()?.split(';').shift() || null;
+    console.log('[getCookie] 找到的值:', result ? '存在' : '不存在');
+    return result;
+  }
+  
+  console.log('[getCookie] 未找到 cookie:', name);
+  return null;
+}
+
+/**
  * 获取本地存储的 refresh token
+ * 优先从 cookie 读取，如果没有则从 localStorage 读取
  */
 export function getStoredRefreshToken(): string | null {
   if (typeof window === 'undefined') return null;
-  return localStorage.getItem('refresh_token');
+  
+  // 优先从 cookie 读取（因为登录时 refresh_token 保存在 cookie 中）
+  let refreshToken = getCookie('refresh_token');
+  console.log('[getStoredRefreshToken] 从 cookie 读取:', !!refreshToken);
+  
+  // 如果 cookie 中没有，尝试从 localStorage 读取
+  if (!refreshToken) {
+    refreshToken = localStorage.getItem('refresh_token');
+    console.log('[getStoredRefreshToken] 从 localStorage 读取:', !!refreshToken);
+  } else {
+    // 如果从 cookie 读取到了，同步到 localStorage
+    localStorage.setItem('refresh_token', refreshToken);
+    console.log('[getStoredRefreshToken] 从 cookie 同步 refresh_token 到 localStorage');
+  }
+  
+  return refreshToken;
 }
 
 /**
@@ -531,6 +633,7 @@ export interface Account {
   email?: string;
   status: number; // 0=禁用, 1=启用
   is_shared: number; // 0=专属, 1=共享
+  need_refresh?: boolean; // 是否需要重新登录
   created_at: string;
   updated_at: string;
   last_used_at?: string | null;
@@ -585,6 +688,20 @@ export async function updateAccountStatus(cookieId: string, status: number): Pro
 }
 
 /**
+ * 更新账号名称
+ */
+export async function updateAccountName(cookieId: string, name: string): Promise<any> {
+  const result = await fetchWithAuth<{ success: boolean; data: any }>(
+    `${API_BASE_URL}/api/plugin-api/accounts/${cookieId}/name`,
+    {
+      method: 'PUT',
+      body: JSON.stringify({ name }),
+    }
+  );
+  return result.data;
+}
+
+/**
  * 获取 OAuth 授权 URL
  */
 export async function getOAuthAuthorizeUrl(isShared: number = 0): Promise<{ auth_url: string; state: string; expires_in: number }> {
@@ -605,6 +722,7 @@ export interface PluginAPIKey {
   user_id: number;
   key_preview: string;
   name: string;
+  config_type: 'antigravity' | 'kiro'; // 配置类型
   is_active: boolean;
   created_at: string;
   last_used_at: string | null;
@@ -616,6 +734,7 @@ export interface CreateAPIKeyResponse {
   user_id: number;
   key: string;
   name: string;
+  config_type: 'antigravity' | 'kiro'; // 配置类型
   is_active: boolean;
   created_at: string;
   last_used_at: string | null;
@@ -644,12 +763,15 @@ export async function getAPIKeyInfo(): Promise<PluginAPIKey | null> {
 /**
  * 生成新的 API Key
  */
-export async function generateAPIKey(name: string = 'My API Key'): Promise<CreateAPIKeyResponse> {
+export async function generateAPIKey(
+  name: string = 'My API Key',
+  configType: 'antigravity' | 'kiro' = 'antigravity'
+): Promise<CreateAPIKeyResponse> {
   return fetchWithAuth<CreateAPIKeyResponse>(
     `${API_BASE_URL}/api/api-keys`,
     {
       method: 'POST',
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({ name, config_type: configType }),
     }
   );
 }
@@ -885,20 +1007,20 @@ export async function sendChatCompletionStream(
   try {
     let response = await makeRequest(token);
 
-    // 如果是 401 错误，尝试刷新 token
-    if (response.status === 401) {
-      const refreshTokenValue = getStoredRefreshToken();
-      if (!refreshTokenValue) {
-        clearAuthCredentials();
-        throw new Error('Session expired, please login again');
-      }
+    // 如果是 401 或 403 错误，尝试刷新 token
+    if (response.status === 401 || response.status === 403) {
+      console.log(`[sendChatCompletionStream] 检测到 ${response.status} 错误，准备刷新 token...`);
+      // 注意：refresh_token 在 httpOnly cookie 中，后端会自动读取
 
       try {
+        console.log('[sendChatCompletionStream] 正在调用刷新接口...');
         const refreshData = await refreshToken();
+        console.log('[sendChatCompletionStream] Token 刷新成功');
         saveAuthCredentials(refreshData);
         token = refreshData.access_token;
         response = await makeRequest(token);
       } catch (refreshError) {
+        console.error('[sendChatCompletionStream] Token 刷新失败:', refreshError);
         clearAuthCredentials();
         throw new Error('Session expired, please login again');
       }
@@ -957,4 +1079,237 @@ export async function sendChatCompletionStream(
   } catch (error) {
     onError(error as Error);
   }
+}
+
+// ==================== Kiro 账号管理相关 API ====================
+
+export interface KiroAccount {
+  account_id: number;
+  user_id: number;
+  account_name?: string | null;
+  email?: string | null;
+  provider: string;
+  is_shared: number; // 0=专属, 1=共享
+  status: number; // 0=禁用, 1=启用
+  created_at: string;
+  updated_at: string;
+  last_used_at?: string | null;
+}
+
+export interface KiroOAuthAuthorizeResponse {
+  success: boolean;
+  data: {
+    auth_url: string;
+    state: string;
+    expires_in: number;
+  };
+}
+
+export interface KiroAccountBalance {
+  account_id: string;
+  account_name: string;
+  email: string;
+  subscription: string;
+  balance: {
+    available: number;
+    total_limit: number;
+    current_usage: number;
+    is_trial: boolean;
+    reset_date: string;
+    free_trial_expiry: string | null;
+  };
+  raw_data: {
+    usage_limit: number;
+    free_trial_limit: number;
+    current_usage: number;
+    free_trial_usage: number;
+  };
+}
+
+export interface KiroConsumptionLog {
+  log_id: string;
+  account_id: string;
+  model_id: string;
+  credit_used: number;
+  is_shared: number;
+  consumed_at: string;
+  account_name: string;
+}
+
+export interface KiroConsumptionModelStats {
+  model_id: string;
+  request_count: string;
+  total_credit: string;
+  avg_credit: string;
+  min_credit: string;
+  max_credit: string;
+}
+
+export interface KiroAccountConsumptionResponse {
+  account_id: string;
+  account_name: string;
+  logs: KiroConsumptionLog[];
+  stats: KiroConsumptionModelStats[];
+  pagination: {
+    limit: number;
+    offset: number;
+    total: number;
+  };
+}
+
+export interface KiroConsumptionStats {
+  total_requests: string;
+  total_credit: string;
+  avg_credit: string;
+  shared_credit: string;
+  private_credit: string;
+}
+
+/**
+ * 获取Kiro OAuth授权URL
+ */
+export async function getKiroOAuthAuthorizeUrl(
+  provider: 'Google' | 'Github',
+  isShared: number = 0
+): Promise<KiroOAuthAuthorizeResponse> {
+  return fetchWithAuth<KiroOAuthAuthorizeResponse>(
+    `${API_BASE_URL}/api/kiro/oauth/authorize`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ provider, is_shared: isShared }),
+    }
+  );
+}
+
+/**
+ * 获取所有Kiro账号列表
+ */
+export async function getKiroAccounts(): Promise<KiroAccount[]> {
+  const result = await fetchWithAuth<{ success: boolean; data: KiroAccount[] }>(
+    `${API_BASE_URL}/api/kiro/accounts`,
+    { method: 'GET' }
+  );
+  return result.data;
+}
+
+/**
+ * 获取单个Kiro账号详情
+ */
+export async function getKiroAccount(accountId: number): Promise<KiroAccount> {
+  const result = await fetchWithAuth<{ success: boolean; data: KiroAccount }>(
+    `${API_BASE_URL}/api/kiro/accounts/${accountId}`,
+    { method: 'GET' }
+  );
+  return result.data;
+}
+
+/**
+ * 更新Kiro账号状态
+ */
+export async function updateKiroAccountStatus(accountId: number, status: number): Promise<any> {
+  const result = await fetchWithAuth<{ success: boolean; data: any }>(
+    `${API_BASE_URL}/api/kiro/accounts/${accountId}/status`,
+    {
+      method: 'PUT',
+      body: JSON.stringify({ status }),
+    }
+  );
+  return result.data;
+}
+
+/**
+ * 更新Kiro账号名称
+ */
+export async function updateKiroAccountName(accountId: number, accountName: string): Promise<any> {
+  const result = await fetchWithAuth<{ success: boolean; data: any }>(
+    `${API_BASE_URL}/api/kiro/accounts/${accountId}/name`,
+    {
+      method: 'PUT',
+      body: JSON.stringify({ account_name: accountName }),
+    }
+  );
+  return result.data;
+}
+
+/**
+ * 获取Kiro账号余额信息
+ */
+export async function getKiroAccountBalance(accountId: number): Promise<KiroAccountBalance> {
+  const result = await fetchWithAuth<{ success: boolean; data: KiroAccountBalance }>(
+    `${API_BASE_URL}/api/kiro/accounts/${accountId}/balance`,
+    { method: 'GET' }
+  );
+  return result.data;
+}
+
+/**
+ * 获取Kiro账号消费记录
+ */
+export async function getKiroAccountConsumption(
+  accountId: number,
+  params?: {
+    limit?: number;
+    offset?: number;
+    start_date?: string;
+    end_date?: string;
+  }
+): Promise<KiroAccountConsumptionResponse> {
+  const queryParams = new URLSearchParams();
+  if (params?.limit) queryParams.append('limit', params.limit.toString());
+  if (params?.offset) queryParams.append('offset', params.offset.toString());
+  if (params?.start_date) queryParams.append('start_date', params.start_date);
+  if (params?.end_date) queryParams.append('end_date', params.end_date);
+  
+  const url = `${API_BASE_URL}/api/kiro/accounts/${accountId}/consumption${queryParams.toString() ? '?' + queryParams.toString() : ''}`;
+  
+  const result = await fetchWithAuth<{ success: boolean; data: KiroAccountConsumptionResponse }>(url, { method: 'GET' });
+  return result.data;
+}
+
+/**
+ * 获取用户总消费统计
+ */
+export async function getKiroConsumptionStats(params?: {
+  start_date?: string;
+  end_date?: string;
+}): Promise<KiroConsumptionStats> {
+  const queryParams = new URLSearchParams();
+  if (params?.start_date) queryParams.append('start_date', params.start_date);
+  if (params?.end_date) queryParams.append('end_date', params.end_date);
+  
+  const url = `${API_BASE_URL}/api/kiro/consumption/stats${queryParams.toString() ? '?' + queryParams.toString() : ''}`;
+  
+  const result = await fetchWithAuth<{ success: boolean; data: KiroConsumptionStats }>(url, { method: 'GET' });
+  return result.data;
+}
+
+/**
+ * 删除Kiro账号
+ */
+export async function deleteKiroAccount(accountId: number): Promise<any> {
+  const result = await fetchWithAuth<{ success: boolean; data: any }>(
+    `${API_BASE_URL}/api/kiro/accounts/${accountId}`,
+    { method: 'DELETE' }
+  );
+  return result.data;
+}
+
+/**
+ * 轮询Kiro OAuth授权状态
+ */
+export async function pollKiroOAuthStatus(state: string): Promise<{
+  success: boolean;
+  status: 'pending' | 'completed' | 'failed' | 'expired';
+  message?: string;
+  data?: any;
+}> {
+  return fetchWithAuth<{
+    success: boolean;
+    status: 'pending' | 'completed' | 'failed' | 'expired';
+    message?: string;
+    data?: any;
+  }>(
+    `${API_BASE_URL}/api/kiro/oauth/status/${state}`,
+    { method: 'GET' }
+  );
 }
