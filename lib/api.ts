@@ -92,9 +92,17 @@ async function handleResponse<T>(response: Response): Promise<T> {
       detail: `HTTP ${response.status}: ${response.statusText}`
     }));
     
-    const errorMessage = typeof error.detail === 'string' 
-      ? error.detail 
-      : error.detail.map(e => e.msg).join(', ');
+    let errorMessage: string;
+    if (typeof error.detail === 'string') {
+      errorMessage = error.detail;
+    } else if (Array.isArray(error.detail)) {
+      errorMessage = error.detail.map(e => e.msg).join(', ');
+    } else if (error.detail && typeof error.detail === 'object') {
+      // 处理对象类型的 detail，例如 {error: "message"}
+      errorMessage = (error.detail as any).error || (error.detail as any).message || JSON.stringify(error.detail);
+    } else {
+      errorMessage = JSON.stringify(error.detail);
+    }
     
     throw new Error(errorMessage);
   }
