@@ -52,6 +52,7 @@ export function SharedPoolModels() {
       'gemini-2.5-pro': 'Gemini 2.5 Pro',
       'gemini-2.5-flash-lite': 'Gemini 2.5 Flash Lite',
       'claude-sonnet-4-5-thinking': 'Claude Sonnet 4.5 Thinking',
+      'claude-opus-4-5-thinking': 'Claude Opus 4.5 Thinking',
       'gemini-2.5-flash-image': 'Gemini 2.5 Flash Image',
       'gemini-2.5-flash-thinking': 'Gemini 2.5 Flash Thinking',
       'gemini-2.5-flash': 'Gemini 2.5 Flash',
